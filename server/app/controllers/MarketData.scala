@@ -2,9 +2,10 @@ package controllers
 
 import akka.actor.{Actor, ActorRef}
 import com.paritytrading.foundation.ASCII
+import com.paritytrading.nassau.util.MoldUDP64
 import com.paritytrading.parity.net.pmd.{PMD, PMDListener, PMDParser}
-import com.paritytrading.parity.top.{Market, MarketListener, Side}
-import com.paritytrading.parity.util.MoldUDP64
+import com.paritytrading.parity.book.{Market, MarketListener, OrderBook, Side}
+import com.paritytrading.parity.util.{Instrument, Instruments}
 import com.typesafe.config.Config
 import java.net.InetSocketAddress
 import org.jvirtanen.config.Configs
@@ -14,24 +15,26 @@ import scala.collection.JavaConverters._
 sealed trait MarketData
 
 case class BBO(
-  instrument: String,
-  bidPrice:   Double,
-  bidSize:    Long,
-  askPrice:   Double,
-  askSize:    Long
+  instrument:  String,
+  bidPrice:    Double,
+  bidSize:     Double,
+  askPrice:    Double,
+  askSize:     Double,
+  priceDigits: Int,
+  sizeDigits:  Int
 ) extends MarketData
 
 case class Trade(
-  instrument: String,
-  price:      Double,
-  size:       Long
+  instrument:  String,
+  price:       Double,
+  size:        Double,
+  priceDigits: Int,
+  sizeDigits:  Int
 ) extends MarketData
 
 case object MarketDataRequest
 
 class MarketDataReceiver(config: Config, publisher: ActorRef) extends Runnable {
-
-  val PriceFactor = 10000.0
 
   override def run {
     val multicastInterface = Configs.getNetworkInterface(config, "market-data.multicast-interface")
@@ -40,30 +43,53 @@ class MarketDataReceiver(config: Config, publisher: ActorRef) extends Runnable {
     val requestAddress     = Configs.getInetAddress(config, "market-data.request-address")
     val requestPort        = Configs.getPort(config, "market-data.request-port")
 
+    val instruments = Instruments.fromConfig(config, "instruments")
+
     val market = new Market(new MarketListener {
 
-      override def bbo(instrument: Long, bidPrice: Long, bidSize: Long, askPrice: Long, askSize: Long) {
+      override def update(book: OrderBook, bbo: Boolean) {
+
+        val bidPrice = book.getBestBidPrice();
+        val bidSize  = book.getBidSize(bidPrice);
+        val askPrice = book.getBestAskPrice();
+        val askSize  = book.getAskSize(askPrice);
+
+        val instrument = instruments.get(book.getInstrument())
+
+        val priceFactor = instrument.getPriceFactor();
+        val sizeFactor  = instrument.getSizeFactor();
+
         publisher ! BBO(
-          instrument = ASCII.unpackLong(instrument).trim,
-          bidPrice   = bidPrice / PriceFactor,
-          bidSize    = bidSize,
-          askPrice   = askPrice / PriceFactor,
-          askSize    = askSize
+          instrument  = ASCII.unpackLong(book.getInstrument()).trim,
+          bidPrice    = bidPrice / priceFactor,
+          bidSize     = bidSize / sizeFactor,
+          askPrice    = askPrice / priceFactor,
+          askSize     = askSize / sizeFactor,
+          priceDigits = instrument.getPriceFractionDigits(),
+          sizeDigits  = instrument.getSizeFractionDigits()
         )
       }
 
-      override def trade(instrument: Long, side: Side, price: Long, size: Long) {
+      override def trade(book: OrderBook, side: Side, price: Long, size: Long) {
+
+        val instrument = instruments.get(book.getInstrument())
+
+        val priceFactor = instrument.getPriceFactor();
+        val sizeFactor  = instrument.getSizeFactor();
+
         publisher ! Trade(
-          instrument = ASCII.unpackLong(instrument).trim,
-          price      = price / PriceFactor,
-          size       = size
+          instrument  = ASCII.unpackLong(book.getInstrument()).trim,
+          price       = price / priceFactor,
+          size        = size / sizeFactor,
+          priceDigits = instrument.getPriceFractionDigits(),
+          sizeDigits  = instrument.getSizeFractionDigits()
         )
       }
 
     })
 
-    config.getStringList("instruments").asScala.foreach { instrument => 
-      market.open(ASCII.packLong(instrument))
+    instruments.asScala.foreach { instrument =>
+      market.open(instrument.asLong())
     }
 
     MoldUDP64.receive(
@@ -73,8 +99,6 @@ class MarketDataReceiver(config: Config, publisher: ActorRef) extends Runnable {
       new PMDParser(new PMDListener {
 
         override def version(message: PMD.Version) = Unit
-
-        override def seconds(message: PMD.Seconds) = Unit
 
         override def orderAdded(message: PMD.OrderAdded) {
           market.add(message.instrument, message.orderNumber, side(message.side), message.price, message.quantity)
@@ -87,12 +111,6 @@ class MarketDataReceiver(config: Config, publisher: ActorRef) extends Runnable {
         override def orderCanceled(message: PMD.OrderCanceled) {
           market.cancel(message.orderNumber, message.canceledQuantity)
         }
-
-        override def orderDeleted(message: PMD.OrderDeleted) {
-          market.delete(message.orderNumber)
-        }
-
-        override def brokenTrade(message: PMD.BrokenTrade) = Unit
 
         def side(side: Byte) = side match {
           case PMD.BUY  => Side.BUY
@@ -136,17 +154,21 @@ class MarketDataRelay(publisher: ActorRef, out: ActorRef) extends Actor {
   def receive = {
     case bbo: BBO =>
       out ! Json.obj(
-        "instrument" -> bbo.instrument,
-        "bidPrice"   -> bbo.bidPrice,
-        "bidSize"    -> bbo.bidSize,
-        "askPrice"   -> bbo.askPrice,
-        "askSize"    -> bbo.askSize
+        "instrument"  -> bbo.instrument,
+        "bidPrice"    -> bbo.bidPrice,
+        "bidSize"     -> bbo.bidSize,
+        "askPrice"    -> bbo.askPrice,
+        "askSize"     -> bbo.askSize,
+        "priceDigits" -> bbo.priceDigits,
+        "sizeDigits"  -> bbo.sizeDigits
       )
     case trade: Trade =>
       out ! Json.obj(
-        "instrument" -> trade.instrument,
-        "price"      -> trade.price,
-        "size"       -> trade.size
+        "instrument"  -> trade.instrument,
+        "price"       -> trade.price,
+        "size"        -> trade.size,
+        "priceDigits" -> trade.priceDigits,
+        "sizeDigits"  -> trade.sizeDigits
       )
     case _ =>
       Unit

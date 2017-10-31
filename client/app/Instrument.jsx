@@ -17,9 +17,11 @@ module.exports = React.createClass({
 });
 
 function formatPrice(container, name) {
-  return !container || !container[name] ? '—' : container[name].toFixed(2);
+  var priceDigits = !container || !container["priceDigits"] ? 2 : container["priceDigits"];
+  return !container || !container[name] ? '—' : container[name].toFixed(priceDigits);
 }
 
 function formatSize(container, name) {
-  return !container || !container[name] ? '—' : container[name];
+  var sizeDigits = !container || !container["sizeDigits"] ? 0 : container["sizeDigits"];
+  return !container || !container[name] ? '—' : container[name].toFixed(sizeDigits);
 }
